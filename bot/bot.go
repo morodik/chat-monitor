@@ -16,6 +16,12 @@ import (
 	"github.com/mymmrac/telego/telegoutil"
 )
 
+type Session struct {
+	State    string
+	Driver   *drivers.TwitchDriver
+	StopChan chan struct{}
+}
+
 func main() {
 	err := godotenv.Load()
 	if err != nil {
@@ -38,10 +44,14 @@ func main() {
 		panic(err)
 	}
 
+	userState := make(map[int64]*Session)
+
 	for update := range updates {
 		if update.Message != nil {
 			msg := update.Message
+			chatID := msg.Chat.ID
 			fmt.Println("Сообщение от ", msg.From.Username, msg.Text)
+
 			switch msg.Text {
 			case "/start", "/stream":
 				keyboard := telegoutil.InlineKeyboard(
@@ -60,33 +70,86 @@ func main() {
 				})
 				continue
 			}
-			if strings.HasPrefix(msg.Text, "http") {
-				err := CheckUrl(msg.Text)
-				if err != nil {
-					bot.SendMessage(ctx, &telego.SendMessageParams{
-						ChatID: telego.ChatID{ID: msg.Chat.ID},
-						Text:   "Неверная ссылка",
-					})
+
+			state, ok := userState[chatID]
+			if ok && state != nil {
+				switch state.State {
+				case "awaiting_twitch_nik":
+					driver := drivers.NewTwitchDriver(msg.Text)
+					err := driver.Connect()
+					if err != nil {
+						log.Println("Ошибка подключения к Twitch:", err)
+						bot.SendMessage(ctx, &telego.SendMessageParams{
+							ChatID: telego.ChatID{ID: chatID},
+							Text:   "Ошибка подключения к Twitch",
+						})
+						continue
+					}
+					stopChan := make(chan struct{})
+					userState[chatID] = &Session{
+						State:    "",
+						Driver:   driver,
+						StopChan: stopChan,
+					}
+					msgChan := make(chan string)
+					go driver.ListenMessage(msgChan, stopChan)
+
+					go func() {
+						for twitchMsg := range msgChan {
+							fmt.Println("Сообщение из Twitch:", twitchMsg)
+						}
+					}()
+
+				case "awaiting_link":
+					if strings.HasPrefix(msg.Text, "http") {
+						err := CheckUrl(msg.Text)
+						if err != nil {
+							bot.SendMessage(ctx, &telego.SendMessageParams{
+								ChatID: telego.ChatID{ID: msg.Chat.ID},
+								Text:   "Неверная ссылка",
+							})
+						}
+					} else {
+						bot.SendMessage(ctx, &telego.SendMessageParams{
+							ChatID: telego.ChatID{ID: msg.Chat.ID},
+							Text:   "Это не ссылка",
+						})
+					}
 				}
-			} else {
-				bot.SendMessage(ctx, &telego.SendMessageParams{
-					ChatID: telego.ChatID{ID: msg.Chat.ID},
-					Text:   "Это не ссылка",
-				})
 			}
-			if update.CallbackQuery != nil {
-				cb := update.CallbackQuery
-				switch cb.Data {
-				case "twitch":
-					bot.SendMessage(ctx, &telego.SendMessageParams{
-						ChatID: telego.ChatID{ID: msg.Chat.ID},
-						Text:   "Введите ник:",
-					})
-					drivers.PlatformCheck("twitch")
-					continue
-				case "other":
-					drivers.PlatformCheck("other")
+
+		}
+		if update.CallbackQuery != nil {
+			cb := update.CallbackQuery
+			chatID := cb.Message.GetChat().ID
+			switch cb.Data {
+			case "twitch":
+				if session, ok := userState[chatID]; ok && session.StopChan != nil {
+					close(session.StopChan)
+					session.Driver.Close()
 				}
+				userState[chatID] = &Session{
+					State:    "awaiting_twitch_nik",
+					Driver:   nil,
+					StopChan: nil,
+				}
+				bot.SendMessage(ctx, &telego.SendMessageParams{
+					ChatID: telego.ChatID{ID: cb.Message.GetChat().ID},
+					Text:   "Введите ник:",
+				})
+				continue
+			case "other":
+				userState[chatID] = &Session{
+					State:    "awaiting_link",
+					Driver:   nil,
+					StopChan: nil,
+				}
+
+				bot.SendMessage(ctx, &telego.SendMessageParams{
+					ChatID: telego.ChatID{ID: cb.Message.GetChat().ID},
+					Text:   "Отправьте ссылку:",
+				})
+				drivers.PlatformCheck("other")
 			}
 		}
 
