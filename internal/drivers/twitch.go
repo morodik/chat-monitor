@@ -79,6 +79,6 @@ func (d *TwitchDriver) Stop() {
 	d.Close()
 }
 
-func (d *TwitchDriver) Close() error {
-	return d.conn.Close()
+func (d *TwitchDriver) Close() {
+	d.conn.Close()
 }

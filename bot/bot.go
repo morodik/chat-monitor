@@ -18,8 +18,9 @@ import (
 
 type Session struct {
 	State    string
-	Driver   *drivers.TwitchDriver
+	Driver   drivers.Driver
 	StopChan chan struct{}
+	MsgChan  chan string
 }
 
 func main() {
@@ -28,29 +29,30 @@ func main() {
 		log.Fatal("Ошибка при загрузке .env файла")
 	}
 
-	// Читаем токен
 	botToken := os.Getenv("TOKEN")
 	if botToken == "" {
 		log.Fatal("TOKEN не найден в переменных окружения")
 	}
+
 	bot, err := telego.NewBot(botToken, telego.WithDefaultDebugLogger())
 	if err != nil {
-		fmt.Println("Error: ", err)
+		log.Fatalf("Ошибка создания бота: %v", err)
 	}
 
 	ctx := context.Background()
 	updates, err := bot.UpdatesViaLongPolling(ctx, nil)
 	if err != nil {
-		panic(err)
+		log.Fatalf("Ошибка запуска long polling: %v", err)
 	}
 
 	userState := make(map[int64]*Session)
 
 	for update := range updates {
+		// бработка текстовых сообщений
 		if update.Message != nil {
 			msg := update.Message
 			chatID := msg.Chat.ID
-			fmt.Println("Сообщение от ", msg.From.Username, msg.Text)
+			fmt.Printf("Сообщение от @%s: %s\n", msg.From.Username, msg.Text)
 
 			switch msg.Text {
 			case "/start", "/stream":
@@ -64,108 +66,175 @@ func main() {
 				)
 
 				bot.SendMessage(ctx, &telego.SendMessageParams{
-					ChatID:      telego.ChatID{ID: msg.Chat.ID},
+					ChatID:      telego.ChatID{ID: chatID},
 					Text:        "Выберите платформу:",
 					ReplyMarkup: keyboard,
 				})
 				continue
 			}
 
-			state, ok := userState[chatID]
-			if ok && state != nil {
-				switch state.State {
+			session, ok := userState[chatID]
+			if ok && session != nil {
+				switch session.State {
 				case "awaiting_twitch_nik":
+					//завершаем предыдущую сессию, если есть
+
 					driver := drivers.NewTwitchDriver(msg.Text)
 					err := driver.Connect()
 					if err != nil {
-						log.Println("Ошибка подключения к Twitch:", err)
+						log.Printf("Ошибка подключения к Twitch: %v", err)
 						bot.SendMessage(ctx, &telego.SendMessageParams{
 							ChatID: telego.ChatID{ID: chatID},
-							Text:   "Ошибка подключения к Twitch",
+							Text:   "Не удалось подключиться к Twitch.",
 						})
 						continue
 					}
+					keyboard := telegoutil.InlineKeyboard(telegoutil.InlineKeyboardRow(
+						telegoutil.InlineKeyboardButton("Завершить").WithCallbackData("end"),
+					))
+					bot.SendMessage(ctx, &telego.SendMessageParams{
+						ChatID:      telego.ChatID{ID: chatID},
+						Text:        "Успешное подключение, при проблемах с трансляцией вы получите уведомление.",
+						ReplyMarkup: keyboard,
+					})
+
 					stopChan := make(chan struct{})
+					msgChan := make(chan string)
+
+					//сохраняем новую сессию
 					userState[chatID] = &Session{
-						State:    "",
+						State:    "", // сбрасываем состояние
 						Driver:   driver,
 						StopChan: stopChan,
+						MsgChan:  msgChan,
 					}
-					msgChan := make(chan string)
-					go driver.ListenMessage(msgChan, stopChan)
 
+					//запуск прослушивания чата
+					go driver.ListenMessage(msgChan, stopChan)
 					go func() {
 						for twitchMsg := range msgChan {
-							fmt.Println("Сообщение из Twitch:", twitchMsg)
+							fmt.Printf("[Twitch %s] %s\n", msg.Text, twitchMsg)
 						}
 					}()
 
 				case "awaiting_link":
+					driver := drivers.NewOtherDriver(msg.Text)
+					err := driver.Connect()
+					if err != nil {
+						log.Printf("Ошибка подключения к трансляции: %v", err)
+						bot.SendMessage(ctx, &telego.SendMessageParams{
+							ChatID: telego.ChatID{ID: chatID},
+							Text:   "Не удалось подключиться к трансляции.",
+						})
+						continue
+					}
 					if strings.HasPrefix(msg.Text, "http") {
 						err := CheckUrl(msg.Text)
 						if err != nil {
 							bot.SendMessage(ctx, &telego.SendMessageParams{
-								ChatID: telego.ChatID{ID: msg.Chat.ID},
-								Text:   "Неверная ссылка",
+								ChatID: telego.ChatID{ID: chatID},
+								Text:   "Неверная ссылка.",
+							})
+						} else {
+							bot.SendMessage(ctx, &telego.SendMessageParams{
+								ChatID: telego.ChatID{ID: chatID},
+								Text:   "Ссылка успешно принята.",
 							})
 						}
 					} else {
 						bot.SendMessage(ctx, &telego.SendMessageParams{
-							ChatID: telego.ChatID{ID: msg.Chat.ID},
-							Text:   "Это не ссылка",
+							ChatID: telego.ChatID{ID: chatID},
+							Text:   "Это не ссылка.",
 						})
 					}
+					stopChan := make(chan struct{})
+					msgChan := make(chan string)
+					userState[chatID] = &Session{
+						State:    "",
+						Driver:   driver,
+						StopChan: stopChan,
+						MsgChan:  msgChan,
+					}
+
+					go driver.ListenMessage(msgChan, stopChan)
+
+					go func() {
+						for msg := range msgChan {
+							fmt.Println("[Other]", msg)
+						}
+					}()
 				}
 			}
-
 		}
+
+		// обработка нажатия на кнопку
 		if update.CallbackQuery != nil {
 			cb := update.CallbackQuery
 			chatID := cb.Message.GetChat().ID
+
+			// Завершаем текущую сессию, если есть
+			if session, ok := userState[chatID]; ok {
+				stopSession(session)
+			}
+
 			switch cb.Data {
 			case "twitch":
-				if session, ok := userState[chatID]; ok && session.StopChan != nil {
-					close(session.StopChan)
-					session.Driver.Close()
-				}
 				userState[chatID] = &Session{
 					State:    "awaiting_twitch_nik",
 					Driver:   nil,
 					StopChan: nil,
+					MsgChan:  nil,
 				}
 				bot.SendMessage(ctx, &telego.SendMessageParams{
-					ChatID: telego.ChatID{ID: cb.Message.GetChat().ID},
-					Text:   "Введите ник:",
+					ChatID: telego.ChatID{ID: chatID},
+					Text:   "Введите ник стримера:",
 				})
-				continue
 			case "other":
 				userState[chatID] = &Session{
 					State:    "awaiting_link",
 					Driver:   nil,
 					StopChan: nil,
+					MsgChan:  nil,
 				}
-
 				bot.SendMessage(ctx, &telego.SendMessageParams{
-					ChatID: telego.ChatID{ID: cb.Message.GetChat().ID},
-					Text:   "Отправьте ссылку:",
+					ChatID: telego.ChatID{ID: chatID},
+					Text:   "Отправьте ссылку на стрим:",
 				})
-				drivers.PlatformCheck("other")
+			case "end":
+				if session, ok := userState[chatID]; ok {
+					if session.StopChan != nil {
+						close(session.StopChan)
+					}
+					if session.MsgChan != nil {
+						close(session.MsgChan)
+					}
+					if session.Driver != nil {
+						session.Driver.Close()
+					}
+				}
+				userState[chatID] = &Session{
+					State:    "",
+					Driver:   nil,
+					StopChan: nil,
+					MsgChan:  nil,
+				}
+				bot.SendMessage(ctx, &telego.SendMessageParams{
+					ChatID: telego.ChatID{ID: chatID},
+					Text:   "Сессия завершена",
+				})
+				continue
 			}
 		}
-
 	}
 }
 
 func CheckUrl(streamURL string) error {
 	_, err := url.ParseRequestURI(streamURL)
 	if err != nil {
-		return fmt.Errorf("Невалидный url", err)
+		return fmt.Errorf("невалидный URL")
 	}
 
-	client := http.Client{
-		Timeout: 5 * time.Second,
-	}
-
+	client := http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Head(streamURL)
 	if err != nil {
 		return fmt.Errorf("не удалось подключиться: %w", err)
@@ -177,4 +246,22 @@ func CheckUrl(streamURL string) error {
 	}
 
 	return nil
+}
+
+func stopSession(session *Session) {
+	if session == nil {
+		return
+	}
+	if session.StopChan != nil {
+		close(session.StopChan)
+		session.StopChan = nil
+	}
+	if session.MsgChan != nil {
+		close(session.MsgChan)
+		session.MsgChan = nil
+	}
+	if session.Driver != nil {
+		session.Driver.Close()
+		session.Driver = nil
+	}
 }

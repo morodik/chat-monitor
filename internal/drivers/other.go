@@ -11,7 +11,21 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-func ParseChat(url string) {
+type OtherDriver struct {
+	url      string
+	ctx      context.Context
+	cancel   context.CancelFunc
+	stopChan chan struct{}
+}
+
+func NewOtherDriver(url string) *OtherDriver {
+	return &OtherDriver{
+		url:      url,
+		stopChan: make(chan struct{}),
+	}
+}
+
+func (d *OtherDriver) Connect() error {
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", true),
 		chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "+
@@ -20,18 +34,24 @@ func ParseChat(url string) {
 	)
 
 	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
-	defer cancelAlloc()
-
 	ctx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-
-	// Навигация и дальнейшая логика:
-	if err := chromedp.Run(ctx, chromedp.Navigate(url)); err != nil {
-		log.Fatal(err)
+	d.ctx = ctx
+	d.cancel = func() {
+		cancel()
+		cancelAlloc()
 	}
 
+	// Навигация и дальнейшая логика:
+	if err := chromedp.Run(d.ctx, chromedp.Navigate(d.url)); err != nil {
+		return fmt.Errorf("ошибка навигации: %w", err)
+	}
+
+	return nil
+}
+func (d *OtherDriver) ListenMessage(out chan string, stopChan chan struct{}) error {
+	defer close(out)
+
 	var chatTexts []string
-	lastSnapshot := ""
 
 	// Регулярные выражения для фильтрации нежелательных сообщений
 	timeRegex := regexp.MustCompile(`^\d{1,2}:\d{2}$`)
@@ -40,54 +60,61 @@ func ParseChat(url string) {
 	systemMessageRegex := regexp.MustCompile(`(?i)(авторизуйтесь|добро пожаловать|настройки чата|to pick up|while dragging|press space)`)
 
 	for {
-		err := chromedp.Run(ctx,
-			chromedp.Evaluate(`[...document.querySelectorAll("div")]
-				.filter(div => div.innerText.trim().length > 0)
-				.map(div => div.innerText.trim())
-				.join("\n")`, &lastSnapshot),
-		)
-		if err != nil {
-			log.Println("Ошибка при парсинге:", err)
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		lines := strings.Split(lastSnapshot, "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-
-			if line == "" || strings.HasSuffix(line, ":") {
-				continue // ник без сообщения
-			}
-
-			if timeRegex.MatchString(line) ||
-				timestampRegex.MatchString(line) ||
-				numberRegex.MatchString(line) ||
-				systemMessageRegex.MatchString(line) {
+		select {
+		case <-d.stopChan:
+			d.cancel()
+			log.Println("Парсинг OtherDriver остановлен.")
+			return nil
+		default:
+			var lastSnapshot string
+			err := chromedp.Run(d.ctx,
+				chromedp.Evaluate(`[...document.querySelectorAll("div")]
+					.filter(div => div.innerText.trim().length > 0)
+					.map(div => div.innerText.trim())
+					.join("\n")`, &lastSnapshot),
+			)
+			if err != nil {
+				log.Println("Ошибка при парсинге:", err)
+				time.Sleep(2 * time.Second)
 				continue
 			}
 
-			// Убираем ник, если строка в формате "Ник: сообщение"
-			if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
-				line = strings.TrimSpace(parts[1])
-			}
+			lines := strings.Split(lastSnapshot, "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
 
-			if len(line) < 3 || contains(chatTexts, line) {
-				continue
-			}
+				// Фильтрация
+				if line == "" || strings.HasSuffix(line, ":") {
+					continue
+				}
+				if timeRegex.MatchString(line) ||
+					timestampRegex.MatchString(line) ||
+					numberRegex.MatchString(line) ||
+					systemMessageRegex.MatchString(line) {
+					continue
+				}
 
-			fmt.Println("Сообщение:", line)
-			chatTexts = append(chatTexts, line)
+				// Убираем ник, если строка в формате "Ник: сообщение"
+				if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
+					line = strings.TrimSpace(parts[1])
+				}
 
-			// Проверка на дубликаты
-			if !contains(chatTexts, line) {
-				fmt.Println("Сообщение:", line)
+				if len(line) < 3 || contains(chatTexts, line) {
+					continue
+				}
+
+				out <- line
 				chatTexts = append(chatTexts, line)
 			}
+			time.Sleep(2 * time.Second)
 		}
-
-		time.Sleep(2 * time.Second)
 	}
+}
+
+func (d *OtherDriver) Close() {
+	close(d.stopChan)
+	d.cancel()
+
 }
 
 func contains(slice []string, item string) bool {
