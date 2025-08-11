@@ -35,6 +35,10 @@ func (d *TwitchDriver) Connect() error {
 func (d *TwitchDriver) ListenMessage(out chan string, stopChan chan struct{}) error {
 	reader := bufio.NewReader(d.conn)
 
+	if stopChan == nil {
+		stopChan = d.stopChan
+	}
+
 	for {
 		select {
 		case <-stopChan:
@@ -80,5 +84,6 @@ func (d *TwitchDriver) Stop() {
 }
 
 func (d *TwitchDriver) Close() {
-	d.conn.Close()
+	_ = d.conn.Close()
+	d.conn = nil
 }

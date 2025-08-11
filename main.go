@@ -1,9 +1,5 @@
 package main
 
-import (
-	"github.com/morodik/chat-monitor/internal/drivers"
-)
-
 func main() {
 	//проверка на использование вебсокета
 
@@ -11,7 +7,7 @@ func main() {
 
 	// это подключение к любому чату не используя веб сокеты и тп
 
-	drivers.ParseChat("https://rutube.ru/video/0f4b436587fe053673a3a213874e4743/")
+	//drivers.ParseChat("https://rutube.ru/video/0f4b436587fe053673a3a213874e4743/")
 
 	//тут рабочее и стабильно подключение к чату твича
 

@@ -7,8 +7,6 @@ import (
 	"regexp"
 
 	"github.com/joho/godotenv"
-	"google.golang.org/api/option"
-	"google.golang.org/api/youtube/v3"
 )
 
 func main() {
@@ -26,8 +24,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Ошибка извлечения id", err)
 	}
-	
-
+	fmt.Println(streamID)
 }
 
 func extractVideoID(url string) (string, error) {

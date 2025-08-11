@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/morodik/chat-monitor/internal/drivers"
@@ -73,8 +72,11 @@ func main() {
 				continue
 			}
 
-			session, ok := userState[chatID]
-			if ok && session != nil {
+			if oldSession, ok := userState[chatID]; ok {
+				stopSession(oldSession)
+			}
+			session := userState[chatID]
+			if session != nil {
 				switch session.State {
 				case "awaiting_twitch_nik":
 					//завершаем предыдущую сессию, если есть
@@ -129,8 +131,8 @@ func main() {
 						continue
 					}
 					if strings.HasPrefix(msg.Text, "http") {
-						err := CheckUrl(msg.Text)
-						if err != nil {
+						err := checkURL(msg.Text)
+						if err == false {
 							bot.SendMessage(ctx, &telego.SendMessageParams{
 								ChatID: telego.ChatID{ID: chatID},
 								Text:   "Неверная ссылка.",
@@ -228,24 +230,19 @@ func main() {
 	}
 }
 
-func CheckUrl(streamURL string) error {
-	_, err := url.ParseRequestURI(streamURL)
-	if err != nil {
-		return fmt.Errorf("невалидный URL")
+func checkURL(link string) bool {
+	// проверка что это вообще URL
+	parsed, err := url.ParseRequestURI(link)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return false
 	}
 
-	client := http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Head(streamURL)
-	if err != nil {
-		return fmt.Errorf("не удалось подключиться: %w", err)
+	// проверка что ресурс доступен (HEAD запрос)
+	resp, err := http.Head(link)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return false
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return fmt.Errorf("сервер вернул статус: %d", resp.StatusCode)
-	}
-
-	return nil
+	return true
 }
 
 func stopSession(session *Session) {
@@ -253,7 +250,7 @@ func stopSession(session *Session) {
 		return
 	}
 	if session.StopChan != nil {
-		close(session.StopChan)
+		safeClose(session.StopChan)
 		session.StopChan = nil
 	}
 	if session.MsgChan != nil {
@@ -264,4 +261,9 @@ func stopSession(session *Session) {
 		session.Driver.Close()
 		session.Driver = nil
 	}
+}
+
+func safeClose(ch chan struct{}) {
+	defer func() { recover() }()
+	close(ch)
 }

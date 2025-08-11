@@ -73,7 +73,8 @@ func (d *OtherDriver) ListenMessage(out chan string, stopChan chan struct{}) err
 					.map(div => div.innerText.trim())
 					.join("\n")`, &lastSnapshot),
 			)
-			if err != nil {
+			if err == context.Canceled {
+			} else if err != nil {
 				log.Println("Ошибка при парсинге:", err)
 				time.Sleep(2 * time.Second)
 				continue
@@ -112,9 +113,11 @@ func (d *OtherDriver) ListenMessage(out chan string, stopChan chan struct{}) err
 }
 
 func (d *OtherDriver) Close() {
-	close(d.stopChan)
 	d.cancel()
 
+	if d.cancel != nil {
+		d.cancel()
+	}
 }
 
 func contains(slice []string, item string) bool {
