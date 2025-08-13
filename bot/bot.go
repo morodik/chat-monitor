@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 
 	"github.com/joho/godotenv"
 	"github.com/morodik/chat-monitor/internal/drivers"
@@ -58,6 +57,12 @@ func main() {
 				keyboard := telegoutil.InlineKeyboard(
 					telegoutil.InlineKeyboardRow(
 						telegoutil.InlineKeyboardButton("Twitch").WithCallbackData("twitch"),
+					),
+					telegoutil.InlineKeyboardRow(
+						telegoutil.InlineKeyboardButton("YouTube").WithCallbackData("youtube"),
+					),
+					telegoutil.InlineKeyboardRow(
+						telegoutil.InlineKeyboardButton("Kick").WithCallbackData("kick"),
 					),
 					telegoutil.InlineKeyboardRow(
 						telegoutil.InlineKeyboardButton("Другое").WithCallbackData("other"),
@@ -119,8 +124,8 @@ func main() {
 						}
 					}()
 
-				case "awaiting_link":
-					driver := drivers.NewOtherDriver(msg.Text)
+				case "awaiting_youtube_link":
+					driver := drivers.NewYouTubeDriver(msg.Text)
 					err := driver.Connect()
 					if err != nil {
 						log.Printf("Ошибка подключения к трансляции: %v", err)
@@ -130,25 +135,25 @@ func main() {
 						})
 						continue
 					}
-					if strings.HasPrefix(msg.Text, "http") {
-						err := checkURL(msg.Text)
-						if err == false {
-							bot.SendMessage(ctx, &telego.SendMessageParams{
-								ChatID: telego.ChatID{ID: chatID},
-								Text:   "Неверная ссылка.",
-							})
-						} else {
-							bot.SendMessage(ctx, &telego.SendMessageParams{
-								ChatID: telego.ChatID{ID: chatID},
-								Text:   "Ссылка успешно принята.",
-							})
-						}
-					} else {
-						bot.SendMessage(ctx, &telego.SendMessageParams{
-							ChatID: telego.ChatID{ID: chatID},
-							Text:   "Это не ссылка.",
-						})
-					}
+					// if strings.HasPrefix(msg.Text, "wss") {
+					// 	err := checkURL(msg.Text)
+					// 	if err == false {
+					// 		bot.SendMessage(ctx, &telego.SendMessageParams{
+					// 			ChatID: telego.ChatID{ID: chatID},
+					// 			Text:   "Неверная ссылка.",
+					// 		})
+					// 	} else {
+					// 		bot.SendMessage(ctx, &telego.SendMessageParams{
+					// 			ChatID: telego.ChatID{ID: chatID},
+					// 			Text:   "Ссылка успешно принята.",
+					// 		})
+					// 	}
+					// } else {
+					// 	bot.SendMessage(ctx, &telego.SendMessageParams{
+					// 		ChatID: telego.ChatID{ID: chatID},
+					// 		Text:   "Это не ссылка.",
+					// 	})
+					// }
 					stopChan := make(chan struct{})
 					msgChan := make(chan string)
 					userState[chatID] = &Session{
@@ -158,11 +163,20 @@ func main() {
 						MsgChan:  msgChan,
 					}
 
+					keyboard := telegoutil.InlineKeyboard(telegoutil.InlineKeyboardRow(
+						telegoutil.InlineKeyboardButton("Завершить").WithCallbackData("end"),
+					))
+					bot.SendMessage(ctx, &telego.SendMessageParams{
+						ChatID:      telego.ChatID{ID: chatID},
+						Text:        "Успешное подключение, при проблемах с трансляцией вы получите уведомление.",
+						ReplyMarkup: keyboard,
+					})
+
 					go driver.ListenMessage(msgChan, stopChan)
 
 					go func() {
 						for msg := range msgChan {
-							fmt.Println("[Other]", msg)
+							fmt.Println("[YouTube]", msg)
 						}
 					}()
 				}
@@ -191,9 +205,9 @@ func main() {
 					ChatID: telego.ChatID{ID: chatID},
 					Text:   "Введите ник стримера:",
 				})
-			case "other":
+			case "youtube":
 				userState[chatID] = &Session{
-					State:    "awaiting_link",
+					State:    "awaiting_youtube_link",
 					Driver:   nil,
 					StopChan: nil,
 					MsgChan:  nil,
@@ -202,6 +216,18 @@ func main() {
 					ChatID: telego.ChatID{ID: chatID},
 					Text:   "Отправьте ссылку на стрим:",
 				})
+			case "kick":
+				userState[chatID] = &Session{
+					State:    "awaiting_kick_link",
+					Driver:   nil,
+					StopChan: nil,
+					MsgChan:  nil,
+				}
+				bot.SendMessage(ctx, &telego.SendMessageParams{
+					ChatID: telego.ChatID{ID: chatID},
+					Text:   "Отправьте ссылку на стрим:",
+				})
+
 			case "end":
 				if session, ok := userState[chatID]; ok {
 					if session.StopChan != nil {
